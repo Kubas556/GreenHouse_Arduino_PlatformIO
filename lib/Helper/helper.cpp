@@ -68,4 +68,12 @@ String* getParsedCommand(String data) {
 
     return arr;
 };
+
+int getSoilHumidity(int vccPin, int dataPin) {
+  digitalWrite(vccPin,HIGH);
+  delay(100);
+  int analog = analogRead(dataPin);
+  digitalWrite(vccPin,LOW);
+  return analog;
+};
 //=======================================================================
