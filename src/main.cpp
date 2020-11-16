@@ -7,7 +7,16 @@
 
 #define DEBUG
 #define DEBUG_ARDUINO_PORT Serial
-#define pinDHT 8
+#define DOUT 6
+#define CLK  5
+#define RELE_1 11 //čerpadlo voda
+#define RELE_2 10 //čerpadlo voda + hnojivo
+#define RELE_3 12 //čerpadlo hnojivo
+#define RELE_4 13 //test topení, jinak budoucí ventilátor
+#define FLOAT_SENSOR_1 9 //mýsící nádoba
+#define FLOAT_SENSOR_2 A1 //nádoba na nojivo
+#define FLOAT_SENSOR_3 A2 //nádoba na vodu
+#define PINDHT 8
 #define soilHumidityDataPin A0
 #define soilHumidityVccPin 4
 
@@ -20,22 +29,39 @@
 #endif
 
 #ifdef DEBUG
-#define ESPTX 3
-#define ESPRX 2
+#define ESPTX 3 // zelený kabel zapojený na ESP do TX
+#define ESPRX 2 // žlutý kabel zapojený na ESP do RX
 #else
 #define ESPTX 1
 #define ESPRX 0
 #endif
 
-DHT dht(pinDHT,DHT22);
+HX711 scale;
+const float calibration_factor = 2300;
+
+DHT dht(PINDHT,DHT22);
 
 SoftwareSerial ESP(ESPTX,ESPRX);
 
-String macAddress;
+//greenhouse basic vars
+String macaddress = "";
 
 String lastCommand = "";
 
 String ESP_status = "unready";
+
+//greenhouse config vars
+int configTemp;
+int configTempTolerantN;
+int configTempTolerantP;
+
+int configIrrigationWater;
+int configIrrigationFert;
+int configIrrigationTotal;
+String configIrrigationRatio;
+
+int configIrrigationSoilHumidity;
+
 /*void sendCommand(String command, String arg1, String arg2) {
     ESP.println(command+"|"+arg1+"|"+arg2);
     while (!ESP.available())
@@ -48,19 +74,65 @@ String ESP_status = "unready";
       DEBUG_MSG_LN(command+" command executed with response: "+ resArr[1]);
 }*/
 
+void sendESPCommand(String command) {
+  ESP.println(command);
+
+  #ifdef DEBUG
+  Serial.println(command);
+  #endif
+
+  lastCommand = command;
+}
+
 void listenForCommandandResponse() {
   if(ESP.available()) {
     String data = ESP.readStringUntil('\n');
     String* args = getParsedCommand(data);
     DEBUG_MSG_LN(data);
+    //commands logic
+    if(args[0] == "setIrrigation") {
+      configIrrigationFert = args[1].toInt();
+      configIrrigationWater = args[2].toInt();
+      configIrrigationRatio = args[3];
+      configIrrigationTotal = args[4].toInt();
+      DEBUG_MSG_LN("set irrigation config");
+      /*DEBUG_MSG_LN(configIrrigationFert);
+      DEBUG_MSG_LN(configIrrigationWater);
+      DEBUG_MSG_LN(configIrrigationRatio);
+      DEBUG_MSG_LN(configIrrigationTotal);*/
+    }
+
+    if(args[0] == "setIrrigationSoilHumidity") {
+      configIrrigationSoilHumidity = args[1].toInt();
+      DEBUG_MSG_LN("set irrigation soil humidity config");
+    }
+
+    if(args[0] == "setTargetTemp") {
+      configTemp = args[1].toInt();
+      configTempTolerantN = args[2].toInt();
+      configTempTolerantP = args[3].toInt();
+      DEBUG_MSG_LN("set temperature config");
+    }
+
+    //response logic
     if(args[0] == "res") {
       if(lastCommand == "getMac") {
         if(args[1] != "unknown" && args[1] != "invalid params") {
-          lastCommand = "";
           DEBUG_MSG_LN(lastCommand+" response "+ args[1]);
-          macAddress = args[1];
+          lastCommand = "";
+          macaddress = args[1];
         } else {
            ESP.println("getMac");
+        }
+      }
+
+      if(lastCommand == "getStatus") {
+        if(args[1] != "unknown" && args[1] != "invalid params") {
+          DEBUG_MSG_LN(lastCommand+" response "+ args[1]);
+          lastCommand = "";
+          ESP_status = args[1];
+        } else {
+           ESP.println("getStatus");
         }
       }
     }
@@ -69,20 +141,161 @@ void listenForCommandandResponse() {
   }
 }
 
+double getWeight() {
+  scale.set_scale(calibration_factor);
+  return scale.get_units();
+}
+
+void vyprazdnitHlavniNadobu() {
+  int weight;
+  do {
+  digitalWrite(RELE_2,LOW);
+  weight = getWeight();
+  DEBUG_MSG_LN(weight);
+  } while(weight > 3);
+  digitalWrite(RELE_2,HIGH);
+}
+
+void zalit() {
+  if(digitalRead(FLOAT_SENSOR_2) == HIGH || analogRead(FLOAT_SENSOR_3) == HIGH) {
+    Serial.println("nelze zalít, chybí jedna z tekutin");
+    return;
+  } 
+  Serial.println("všechny nádoby jsou plné");
+  int weight;
+  do
+  {
+    digitalWrite(RELE_1,LOW);
+    Serial.println("čerpání vody....");
+    /*if(digitalRead(FLOAT_SENSOR_3) == LOW)
+    break;*/
+    weight = getWeight();
+    DEBUG_MSG_LN(weight);
+  }while(weight <= configIrrigationWater);
+  digitalWrite(RELE_1,HIGH);
+
+  vyprazdnitHlavniNadobu();
+  //Serial.println("Došla voda");
+}
+
+unsigned long lastCheckMillis = 0;
+
+void repeatCommandIfNoResponse() {
+  if(lastCommand != "") {
+    if(millis() - lastCheckMillis >= 60*1000UL) {
+        lastCheckMillis = millis();
+        if(lastCommand != "")
+        sendESPCommand(lastCommand);
+    } else if(millis() < lastCheckMillis) {
+        lastCheckMillis = millis();
+    }
+  } else {
+    lastCheckMillis = millis();
+  }
+}
+
 unsigned long lastMillis = 0;
+bool fireOnce = true;
+bool heating = false;
+int lastSoilHumidity;
+float lastTemp;
+
+void updateHumidity() {
+  int soilHumidity = getSoilHumidity(soilHumidityVccPin,soilHumidityDataPin);
+  lastSoilHumidity = soilHumidity;
+  DEBUG_MSG("Humidity of soil is:");
+  DEBUG_MSG_LN(soilHumidity);
+  ESP.println("setSoilHumidity|"+macaddress+"|"+((String)soilHumidity)); 
+}
+
+void updateTemp() {
+  float temp = dht.readTemperature();
+
+  if(isnan(temp)) {
+    DEBUG_MSG_LN("sensor not found");
+  } else {
+    DEBUG_MSG_LN("temp is: "+(String)temp);
+    lastTemp = temp;
+    ESP.println("setTemp|"+macaddress+"|"+((String)temp));
+  }
+}
+
+void heatingAndCooling() {
+  if(lastTemp) {
+    if(lastTemp < (configTemp-configTempTolerantN)){
+      digitalWrite(RELE_4,LOW);
+      heating = true;
+    }
+
+    if(lastTemp >= configTemp && heating) {
+      digitalWrite(RELE_4,HIGH);
+      heating = false;
+    }
+
+    if(lastTemp > (configTemp+configTempTolerantP))
+    {}
+  }
+}
+
+void mainLoop() {
+  if(fireOnce) {
+    fireOnce = false;
+    //zalit();
+  }
+
+    if(millis() - lastMillis >= 0.1*60*1000UL) {
+      lastMillis = millis();
+
+      updateHumidity();
+
+      updateTemp();
+    }
+    else if(millis() < lastMillis) {
+      lastMillis = millis();
+    }
+
+    heatingAndCooling();
+}
 
 void setup() {
   delay(5000);
-  // put your setup code here, to run once:
+
+  pinMode(FLOAT_SENSOR_1,INPUT); //mýsící nádoba
+  pinMode(FLOAT_SENSOR_2,INPUT); //nádoba na nojivo
+  pinMode(FLOAT_SENSOR_3,INPUT); //nádoba na vodu
+  pinMode(RELE_1,OUTPUT);
+  pinMode(RELE_2,OUTPUT);
+  pinMode(RELE_3,OUTPUT);
+  pinMode(RELE_4,OUTPUT);
+  
+  digitalWrite(RELE_1,HIGH);
+  digitalWrite(RELE_2,HIGH);
+  digitalWrite(RELE_3,HIGH);
+  digitalWrite(RELE_4,HIGH);
+
   Serial.begin(9600);
   ESP.begin(9600);
   dht.begin();
-  ESP.println("getMac");
-  lastCommand = "getMac";
+  scale.begin(DOUT, CLK);
+  scale.set_scale();
+  scale.tare(); //Reset the scale to 0
+
+  sendESPCommand("getStatus");
 }
 
 void loop() {
   listenForCommandandResponse();
+
+  repeatCommandIfNoResponse();
+
+  //waiting to ESP to connect
+  if(ESP_status != "ready" && lastCommand != "getStatus")
+    sendESPCommand("getStatus");
+
+  //get mac address of ESP
+  if(ESP_status == "ready" && macaddress == "" && lastCommand != "getMac") {
+    sendESPCommand("getMac");
+  }
 
   #ifdef DEBUG
   if(Serial.available()) {
@@ -90,25 +303,18 @@ void loop() {
   } 
   #endif
 
-  if(millis() - lastMillis >= 0.1*60*1000UL) {
+  //when everything is ready, start greenhouse work
+  if(ESP_status == "ready" 
+  && macaddress != "" 
+  && configTemp 
+  && configTempTolerantN 
+  && configTempTolerantP 
+  && configIrrigationFert 
+  && configIrrigationWater 
+  && configIrrigationRatio 
+  && configIrrigationTotal 
+  && configIrrigationSoilHumidity) {
 
-    lastMillis = millis();
-
-    int soilHumidity = getSoilHumidity(soilHumidityVccPin,soilHumidityDataPin);
-
-    DEBUG_MSG("Humidity of soil is:");
-    DEBUG_MSG_LN(soilHumidity);
-
-    float t = dht.readTemperature();
-
-    if(isnan(t)) {
-      DEBUG_MSG_LN("sensor not found");
-    } else {
-      DEBUG_MSG_LN("temp is: "+(String)t);
-      ESP.println("setTemp|"+macAddress+"|"+((String)t));
-    }
-  }
-  else if(millis() < lastMillis) {
-    lastMillis = millis();
+    mainLoop();
   }
 }
