@@ -7,6 +7,7 @@
 
 #define DEBUG
 #define DEBUG_ARDUINO_PORT Serial
+#define RELE_HEATING 7
 #define DOUT 6
 #define CLK  5
 #define RELE_1 11 //čerpadlo voda
@@ -14,7 +15,7 @@
 #define RELE_3 12 //čerpadlo hnojivo
 #define RELE_4 13 //test topení, jinak budoucí ventilátor
 #define FLOAT_SENSOR_1 9 //mýsící nádoba
-#define FLOAT_SENSOR_2 A1 //nádoba na nojivo
+#define FLOAT_SENSOR_2 A1 //nádoba na hnojivo
 #define FLOAT_SENSOR_3 A2 //nádoba na vodu
 #define PINDHT 8
 #define soilHumidityDataPin A0
@@ -51,15 +52,18 @@ String lastCommand = "";
 String ESP_status = "unready";
 
 //greenhouse config vars
+bool tempConfigDone = false;
 int configTemp;
 int configTempTolerantN;
 int configTempTolerantP;
 
+bool irrigationConfigDone = false;
 int configIrrigationWater;
 int configIrrigationFert;
 int configIrrigationTotal;
 String configIrrigationRatio;
 
+bool irrigationSoilHumidityDone = false;
 int configIrrigationSoilHumidity;
 
 /*void sendCommand(String command, String arg1, String arg2) {
@@ -84,6 +88,14 @@ void sendESPCommand(String command) {
   lastCommand = command;
 }
 
+void sendNotification(String command, bool val) {
+  ESP.println("notify|"+macaddress+"|"+command+"|"+val);
+
+  #ifdef DEBUG
+  Serial.println(command);
+  #endif
+}
+
 void listenForCommandandResponse() {
   if(ESP.available()) {
     String data = ESP.readStringUntil('\n');
@@ -95,15 +107,13 @@ void listenForCommandandResponse() {
       configIrrigationWater = args[2].toInt();
       configIrrigationRatio = args[3];
       configIrrigationTotal = args[4].toInt();
+      irrigationConfigDone = true;
       DEBUG_MSG_LN("set irrigation config");
-      /*DEBUG_MSG_LN(configIrrigationFert);
-      DEBUG_MSG_LN(configIrrigationWater);
-      DEBUG_MSG_LN(configIrrigationRatio);
-      DEBUG_MSG_LN(configIrrigationTotal);*/
     }
 
     if(args[0] == "setIrrigationSoilHumidity") {
       configIrrigationSoilHumidity = args[1].toInt();
+      irrigationSoilHumidityDone = true;
       DEBUG_MSG_LN("set irrigation soil humidity config");
     }
 
@@ -111,6 +121,7 @@ void listenForCommandandResponse() {
       configTemp = args[1].toInt();
       configTempTolerantN = args[2].toInt();
       configTempTolerantP = args[3].toInt();
+      tempConfigDone = true;
       DEBUG_MSG_LN("set temperature config");
     }
 
@@ -137,8 +148,8 @@ void listenForCommandandResponse() {
       }
     }
 
-    delete args;
-  }
+    delete [] args;
+  };
 }
 
 double getWeight() {
@@ -157,22 +168,44 @@ void vyprazdnitHlavniNadobu() {
 }
 
 void zalit() {
-  if(digitalRead(FLOAT_SENSOR_2) == HIGH || analogRead(FLOAT_SENSOR_3) == HIGH) {
-    Serial.println("nelze zalít, chybí jedna z tekutin");
+  if(analogRead(FLOAT_SENSOR_2) == LOW || analogRead(FLOAT_SENSOR_3) == LOW) {
+    DEBUG_MSG_LN("nelze zalít, chybí jedna z tekutin");
+
+    if(analogRead(FLOAT_SENSOR_2) == LOW)
+    sendNotification("outOfFertiliser",true);
+
+    if(analogRead(FLOAT_SENSOR_3) == LOW)
+    sendNotification("outOfWater",true);
+
+
     return;
   } 
-  Serial.println("všechny nádoby jsou plné");
+
+  DEBUG_MSG_LN("všechny nádoby jsou plné");
   int weight;
+  scale.tare();
+  delay(100);
   do
   {
     digitalWrite(RELE_1,LOW);
-    Serial.println("čerpání vody....");
+    DEBUG_MSG_LN("čerpání vody....");
     /*if(digitalRead(FLOAT_SENSOR_3) == LOW)
     break;*/
     weight = getWeight();
     DEBUG_MSG_LN(weight);
   }while(weight <= configIrrigationWater);
   digitalWrite(RELE_1,HIGH);
+  DEBUG_MSG_LN("voda načerpána");
+  do
+  {
+    digitalWrite(RELE_3,LOW);
+    DEBUG_MSG_LN("čerpání hnojiva....");
+    /*if(digitalRead(FLOAT_SENSOR_3) == LOW)
+    break;*/
+    weight = getWeight();
+    DEBUG_MSG_LN(weight);
+  }while(weight <= (configIrrigationWater + configIrrigationFert));
+  digitalWrite(RELE_3,HIGH);
 
   vyprazdnitHlavniNadobu();
   //Serial.println("Došla voda");
@@ -194,7 +227,8 @@ void repeatCommandIfNoResponse() {
   }
 }
 
-unsigned long lastMillis = 0;
+unsigned long lastHumidityMillis = 0;
+unsigned long lastTempMillis = 0;
 bool fireOnce = true;
 bool heating = false;
 int lastSoilHumidity;
@@ -222,13 +256,13 @@ void updateTemp() {
 
 void heatingAndCooling() {
   if(lastTemp) {
-    if(lastTemp < (configTemp-configTempTolerantN)){
-      digitalWrite(RELE_4,LOW);
+    if(lastTemp < (configTemp+configTempTolerantN)){
+       digitalWrite(RELE_HEATING,LOW);
       heating = true;
     }
 
     if(lastTemp >= configTemp && heating) {
-      digitalWrite(RELE_4,HIGH);
+      digitalWrite(RELE_HEATING,HIGH);
       heating = false;
     }
 
@@ -243,35 +277,45 @@ void mainLoop() {
     //zalit();
   }
 
-    if(millis() - lastMillis >= 0.1*60*1000UL) {
-      lastMillis = millis();
+  if(millis() - lastHumidityMillis >= 60*60*1000UL) {//60
+    lastHumidityMillis = millis();
 
-      updateHumidity();
+    updateHumidity();
 
-      updateTemp();
-    }
-    else if(millis() < lastMillis) {
-      lastMillis = millis();
-    }
+    if(lastSoilHumidity > configIrrigationSoilHumidity )
+    zalit();
+    
+  }
+  else if(millis() < lastHumidityMillis) {
+    lastHumidityMillis = millis();
+  }
 
-    heatingAndCooling();
+  if(millis() - lastTempMillis >= 1*60*1000UL) {
+    lastTempMillis = millis();
+    updateTemp();
+  }
+  else if(millis() < lastTempMillis) {
+    lastTempMillis = millis();
+  }
+
+  heatingAndCooling();
 }
 
 void setup() {
-  delay(5000);
-
-  pinMode(FLOAT_SENSOR_1,INPUT); //mýsící nádoba
-  pinMode(FLOAT_SENSOR_2,INPUT); //nádoba na nojivo
+  pinMode(FLOAT_SENSOR_1,INPUT); //mísící nádoba
+  pinMode(FLOAT_SENSOR_2,INPUT); //nádoba na hnojivo
   pinMode(FLOAT_SENSOR_3,INPUT); //nádoba na vodu
   pinMode(RELE_1,OUTPUT);
   pinMode(RELE_2,OUTPUT);
   pinMode(RELE_3,OUTPUT);
   pinMode(RELE_4,OUTPUT);
+  pinMode(RELE_HEATING, OUTPUT);
   
   digitalWrite(RELE_1,HIGH);
   digitalWrite(RELE_2,HIGH);
   digitalWrite(RELE_3,HIGH);
   digitalWrite(RELE_4,HIGH);
+  digitalWrite(RELE_HEATING,HIGH);
 
   Serial.begin(9600);
   ESP.begin(9600);
@@ -306,15 +350,9 @@ void loop() {
   //when everything is ready, start greenhouse work
   if(ESP_status == "ready" 
   && macaddress != "" 
-  && configTemp 
-  && configTempTolerantN 
-  && configTempTolerantP 
-  && configIrrigationFert 
-  && configIrrigationWater 
-  && configIrrigationRatio 
-  && configIrrigationTotal 
-  && configIrrigationSoilHumidity) {
-
+  && tempConfigDone
+  && irrigationConfigDone 
+  && irrigationSoilHumidityDone) {
     mainLoop();
   }
 }

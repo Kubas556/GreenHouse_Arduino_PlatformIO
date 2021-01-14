@@ -71,7 +71,7 @@ String* getParsedCommand(String data) {
 
 int getSoilHumidity(int vccPin, int dataPin) {
   digitalWrite(vccPin,HIGH);
-  delay(100);
+  delay(500);
   int analog = analogRead(dataPin);
   digitalWrite(vccPin,LOW);
   return analog;
