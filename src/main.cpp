@@ -208,6 +208,19 @@ void zalit() {
   digitalWrite(RELE_3,HIGH);
 
   vyprazdnitHlavniNadobu();
+
+  if(analogRead(FLOAT_SENSOR_2) == LOW)
+    sendNotification("outOfFertiliser",true);
+  else
+    sendNotification("outOfFertiliser",false);
+  
+  
+
+  if(analogRead(FLOAT_SENSOR_3) == LOW)
+    sendNotification("outOfWater",true);
+  else
+    sendNotification("outOfWater",false);
+  
   //Serial.println("Došla voda");
 }
 
@@ -232,6 +245,7 @@ unsigned long lastTempMillis = 0;
 bool fireOnce = true;
 bool heating = false;
 int lastSoilHumidity;
+float lastAirHumidity;
 float lastTemp;
 
 void updateHumidity() {
@@ -240,6 +254,12 @@ void updateHumidity() {
   DEBUG_MSG("Humidity of soil is:");
   DEBUG_MSG_LN(soilHumidity);
   ESP.println("setSoilHumidity|"+macaddress+"|"+((String)soilHumidity)); 
+
+  float airHumidity = dht.readHumidity();
+  lastAirHumidity = airHumidity;
+  DEBUG_MSG("Humidity of air is:");
+  DEBUG_MSG_LN(airHumidity);
+  ESP.println("setAirHumidity|"+macaddress+"|"+((String)airHumidity));
 }
 
 void updateTemp() {
@@ -274,7 +294,11 @@ void heatingAndCooling() {
 void mainLoop() {
   if(fireOnce) {
     fireOnce = false;
-    //zalit();
+
+    updateHumidity();
+
+    if(lastSoilHumidity > configIrrigationSoilHumidity )
+    zalit();
   }
 
   if(millis() - lastHumidityMillis >= 60*60*1000UL) {//60
