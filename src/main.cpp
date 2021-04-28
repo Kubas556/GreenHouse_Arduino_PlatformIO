@@ -179,32 +179,41 @@ void zalit() {
 
 
     return;
-  } 
+  }
 
   DEBUG_MSG_LN("všechny nádoby jsou plné");
   int weight;
   scale.tare();
   delay(100);
+  int fertWeight = configIrrigationWater + configIrrigationFert;
+  // zalití vodou
   do
   {
     digitalWrite(RELE_1,LOW);
-    DEBUG_MSG_LN("čerpání vody....");
-    /*if(digitalRead(FLOAT_SENSOR_3) == LOW)
-    break;*/
+    //DEBUG_MSG_LN("čerpání vody....");
+    if(digitalRead(FLOAT_SENSOR_3) == LOW) {
+      //DEBUG_MSG_LN(configIrrigationRatio.substring(configIrrigationRatio.indexOf(':')+1,configIrrigationRatio.length()));
+      break;
+    }
+
     weight = getWeight();
-    DEBUG_MSG_LN(weight);
+    //DEBUG_MSG_LN(weight);
+    delay(100);
   }while(weight <= configIrrigationWater);
   digitalWrite(RELE_1,HIGH);
   DEBUG_MSG_LN("voda načerpána");
+
+  // zalití hnojivem
   do
   {
     digitalWrite(RELE_3,LOW);
-    DEBUG_MSG_LN("čerpání hnojiva....");
-    /*if(digitalRead(FLOAT_SENSOR_3) == LOW)
-    break;*/
+    //DEBUG_MSG_LN("čerpání hnojiva....");
+    if(digitalRead(FLOAT_SENSOR_2) == LOW)
+    break;
     weight = getWeight();
-    DEBUG_MSG_LN(weight);
-  }while(weight <= (configIrrigationWater + configIrrigationFert));
+    //DEBUG_MSG_LN(weight);
+    delay(100);
+  }while(weight <= fertWeight);
   digitalWrite(RELE_3,HIGH);
 
   vyprazdnitHlavniNadobu();
